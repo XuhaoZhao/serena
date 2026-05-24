@@ -1,0 +1,24 @@
+services:
+  serena:
+    image: serena:intranet
+    container_name: serena-xxl-job
+    volumes:
+      - /Users/zxh/code-repo/xxl-job:/workspace/xxl-job
+    ports:
+      - "${SERENA_PORT:-9121}:9121"
+      - "${SERENA_DASHBOARD_PORT:-24282}:24282"
+    environment:
+      - SERENA_DOCKER=1
+    stdin_open: true
+    tty: true
+    command:
+      - serena
+      - start-mcp-server
+      - --project
+      - /workspace/xxl-job
+      - --transport
+      - sse
+      - --port
+      - "9121"
+      - --host
+      - 0.0.0.0

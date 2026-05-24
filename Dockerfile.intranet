@@ -31,7 +31,8 @@ RUN python3 -m pip install --no-cache-dir pipx \
 # ---------------------------------------------------------------------------
 ENV NVM_VERSION=0.40.3
 ENV NODE_VERSION=22.18.0
-RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh | bash
+RUN set -o pipefail \
+    && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v${NVM_VERSION}/install.sh | bash
 # standard location
 ENV NVM_DIR=/root/.nvm
 RUN . "$NVM_DIR/nvm.sh" && nvm install ${NODE_VERSION}
@@ -43,7 +44,9 @@ ENV PATH="${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/:${PATH}"
 ENV PATH="${PATH}:/root/.local/bin"
 
 # Install the latest version of uv
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN set -o pipefail \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh \
+    && uv --version
 
 # Install Rust and rustup for rust-analyzer support (minimal profile)
 ENV RUSTUP_HOME=/usr/local/rustup

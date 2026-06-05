@@ -89,6 +89,104 @@ RUN uv pip install -r pyproject.toml -e .
 ENV PATH="/workspaces/serena/.venv/bin:${PATH}"
 
 # ---------------------------------------------------------------------------
+# Pre-download Java LSP server dependencies (Gradle, vscode-java VSIX,
+# IntelliCode) during image build so that no external network access is
+# required at container startup.  The skip-if-exists logic in
+# eclipse_jdtls.py will detect these files and skip the downloads.
+#
+# NOTE: If you only need non-Java language servers, comment out this block
+# to save ~500 MB of image size and reduce build time.
+# ---------------------------------------------------------------------------
+RUN set -o pipefail && python3 -c "
+import os, sys, tempfile, zipfile, hashlib, shutil, urllib.request, ssl
+
+LS_DIR = os.environ['SERENA_HOME'] + '/language_servers/static/EclipseJDTLS'
+os.makedirs(LS_DIR, exist_ok=True)
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, 'rb') as f:
+        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b''):
+            h.update(chunk)
+    return h.hexdigest()
+
+def download(url, dest_path, expected_sha256=None):
+    print(f'[build] Downloading {url} ...', flush=True)
+    ctx = ssl.create_default_context()
+    tmp = os.path.join(tempfile.mkdtemp(), 'download')
+    try:
+        urllib.request.urlretrieve(url, tmp)
+        if expected_sha256:
+            actual = sha256_file(tmp)
+            if actual != expected_sha256:
+                raise RuntimeError(f'SHA256 mismatch: expected {expected_sha256}, got {actual}')
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        shutil.move(tmp, dest_path)
+        print(f'[build] Saved to {dest_path}', flush=True)
+    finally:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+
+def extract_zip(zip_path, dest_dir):
+    print(f'[build] Extracting {zip_path} -> {dest_dir} ...', flush=True)
+    os.makedirs(dest_dir, exist_ok=True)
+    with zipfile.ZipFile(zip_path, 'r') as zf:
+        zf.extractall(dest_dir)
+    os.remove(zip_path)
+
+# --- Gradle 8.14.2 ---
+gradle_ver = '8.14.2'
+gradle_dir = os.path.join(LS_DIR, f'gradle-{gradle_ver}')
+if os.path.exists(gradle_dir):
+    print(f'[build] Gradle already exists, skipping', flush=True)
+else:
+    download(
+        f'https://services.gradle.org/distributions/gradle-{gradle_ver}-bin.zip',
+        os.path.join(LS_DIR, f'gradle-{gradle_ver}.zip'),
+        expected_sha256='7197a12f450794931532469d4ff21a59ea2c1cd59a3ec3f89c035c3c420a6999',
+    )
+    extract_zip(os.path.join(LS_DIR, f'gradle-{gradle_ver}.zip'), os.path.dirname(gradle_dir))
+
+# --- vscode-java VSIX 1.54.0-923 (linux-x64) ---
+vj_ver = '1.54.0-923'
+vj_tag = 'v' + vj_ver.rsplit('-', 1)[0]
+vj_dirname = f'vscode-java-{vj_ver}'
+vj_dir = os.path.join(LS_DIR, vj_dirname)
+lombok_jar = os.path.join(vj_dir, 'extension/lombok/lombok-1.18.39-4050.jar')
+if os.path.exists(lombok_jar):
+    print(f'[build] vscode-java already exists, skipping', flush=True)
+else:
+    download(
+        f'https://github.com/redhat-developer/vscode-java/releases/download/{vj_tag}/java-linux-x64-{vj_ver}.vsix',
+        os.path.join(LS_DIR, f'{vj_dirname}.vsix'),
+        expected_sha256='9d4b15da54e25a0192f9bac073f086c015397d3676623b68dbf83a5dbaf5132b',
+    )
+    extract_zip(os.path.join(LS_DIR, f'{vj_dirname}.vsix'), vj_dir)
+
+# --- IntelliCode 1.2.30 ---
+ic_ver = '1.2.30'
+ic_dirname = f'intellicode-{ic_ver}'
+ic_dir = os.path.join(LS_DIR, ic_dirname)
+ic_jar = os.path.join(ic_dir, 'extension/dist/com.microsoft.jdtls.intellicode.core-0.7.0.jar')
+if os.path.exists(ic_jar):
+    print(f'[build] IntelliCode already exists, skipping', flush=True)
+else:
+    try:
+        download(
+            'https://VisualStudioExptTeam.gallery.vsassets.io/_apis/public/gallery/publisher/VisualStudioExptTeam/extension/vscodeintellicode/1.2.30/assetbyname/Microsoft.VisualStudio.Services.VSIXPackage',
+            os.path.join(LS_DIR, f'{ic_dirname}.vsix'),
+            expected_sha256='7f61a7f96d101cdf230f96821be3fddd8f890ebfefb3695d18beee43004ae251',
+        )
+        extract_zip(os.path.join(LS_DIR, f'{ic_dirname}.vsix'), ic_dir)
+    except Exception as e:
+        print(f'[build] IntelliCode download failed (non-fatal, optional): {e}', flush=True)
+        if os.path.exists(os.path.join(LS_DIR, f'{ic_dirname}.vsix')):
+            os.remove(os.path.join(LS_DIR, f'{ic_dirname}.vsix'))
+
+print('[build] Java LSP pre-download complete', flush=True)
+"
+
+# ---------------------------------------------------------------------------
 # Production stage — trims down dev-only layers and sets the runtime entrypoint
 # ---------------------------------------------------------------------------
 FROM base AS production

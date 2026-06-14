@@ -97,94 +97,81 @@ ENV PATH="/workspaces/serena/.venv/bin:${PATH}"
 # NOTE: If you only need non-Java language servers, comment out this block
 # to save ~500 MB of image size and reduce build time.
 # ---------------------------------------------------------------------------
-RUN set -o pipefail && python3 -c "
-import os, sys, tempfile, zipfile, hashlib, shutil, urllib.request, ssl
-
-LS_DIR = os.environ['SERENA_HOME'] + '/language_servers/static/EclipseJDTLS'
-os.makedirs(LS_DIR, exist_ok=True)
-
-def sha256_file(path):
-    h = hashlib.sha256()
-    with open(path, 'rb') as f:
-        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b''):
-            h.update(chunk)
-    return h.hexdigest()
-
-def download(url, dest_path, expected_sha256=None):
-    print(f'[build] Downloading {url} ...', flush=True)
-    ctx = ssl.create_default_context()
-    tmp = os.path.join(tempfile.mkdtemp(), 'download')
-    try:
-        urllib.request.urlretrieve(url, tmp)
-        if expected_sha256:
-            actual = sha256_file(tmp)
-            if actual != expected_sha256:
-                raise RuntimeError(f'SHA256 mismatch: expected {expected_sha256}, got {actual}')
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-        shutil.move(tmp, dest_path)
-        print(f'[build] Saved to {dest_path}', flush=True)
-    finally:
-        if os.path.exists(tmp):
-            os.remove(tmp)
-
-def extract_zip(zip_path, dest_dir):
-    print(f'[build] Extracting {zip_path} -> {dest_dir} ...', flush=True)
-    os.makedirs(dest_dir, exist_ok=True)
-    with zipfile.ZipFile(zip_path, 'r') as zf:
-        zf.extractall(dest_dir)
-    os.remove(zip_path)
-
-# --- Gradle 8.14.2 ---
-gradle_ver = '8.14.2'
-gradle_dir = os.path.join(LS_DIR, f'gradle-{gradle_ver}')
-if os.path.exists(gradle_dir):
-    print(f'[build] Gradle already exists, skipping', flush=True)
-else:
-    download(
-        f'https://services.gradle.org/distributions/gradle-{gradle_ver}-bin.zip',
-        os.path.join(LS_DIR, f'gradle-{gradle_ver}.zip'),
-        expected_sha256='7197a12f450794931532469d4ff21a59ea2c1cd59a3ec3f89c035c3c420a6999',
-    )
-    extract_zip(os.path.join(LS_DIR, f'gradle-{gradle_ver}.zip'), os.path.dirname(gradle_dir))
-
-# --- vscode-java VSIX 1.54.0-923 (linux-x64) ---
-vj_ver = '1.54.0-923'
-vj_tag = 'v' + vj_ver.rsplit('-', 1)[0]
-vj_dirname = f'vscode-java-{vj_ver}'
-vj_dir = os.path.join(LS_DIR, vj_dirname)
-lombok_jar = os.path.join(vj_dir, 'extension/lombok/lombok-1.18.39-4050.jar')
-if os.path.exists(lombok_jar):
-    print(f'[build] vscode-java already exists, skipping', flush=True)
-else:
-    download(
-        f'https://github.com/redhat-developer/vscode-java/releases/download/{vj_tag}/java-linux-x64-{vj_ver}.vsix',
-        os.path.join(LS_DIR, f'{vj_dirname}.vsix'),
-        expected_sha256='9d4b15da54e25a0192f9bac073f086c015397d3676623b68dbf83a5dbaf5132b',
-    )
-    extract_zip(os.path.join(LS_DIR, f'{vj_dirname}.vsix'), vj_dir)
-
-# --- IntelliCode 1.2.30 ---
-ic_ver = '1.2.30'
-ic_dirname = f'intellicode-{ic_ver}'
-ic_dir = os.path.join(LS_DIR, ic_dirname)
-ic_jar = os.path.join(ic_dir, 'extension/dist/com.microsoft.jdtls.intellicode.core-0.7.0.jar')
-if os.path.exists(ic_jar):
-    print(f'[build] IntelliCode already exists, skipping', flush=True)
-else:
-    try:
-        download(
-            'https://VisualStudioExptTeam.gallery.vsassets.io/_apis/public/gallery/publisher/VisualStudioExptTeam/extension/vscodeintellicode/1.2.30/assetbyname/Microsoft.VisualStudio.Services.VSIXPackage',
-            os.path.join(LS_DIR, f'{ic_dirname}.vsix'),
-            expected_sha256='7f61a7f96d101cdf230f96821be3fddd8f890ebfefb3695d18beee43004ae251',
-        )
-        extract_zip(os.path.join(LS_DIR, f'{ic_dirname}.vsix'), ic_dir)
-    except Exception as e:
-        print(f'[build] IntelliCode download failed (non-fatal, optional): {e}', flush=True)
-        if os.path.exists(os.path.join(LS_DIR, f'{ic_dirname}.vsix')):
-            os.remove(os.path.join(LS_DIR, f'{ic_dirname}.vsix'))
-
-print('[build] Java LSP pre-download complete', flush=True)
-"
+RUN set -euo pipefail && \
+    LS_DIR="$SERENA_HOME/language_servers/static/EclipseJDTLS" && \
+    mkdir -p "$LS_DIR" && \
+    \
+    download_and_verify() { \
+        local url="$1" dest="$2" expected_sha256="$3"; \
+        echo "[build] Downloading $url ..." && \
+        curl --fail --location --output "$dest" "$url" && \
+        actual=$(sha256sum "$dest" | awk '{print $1}') && \
+        if [ "$actual" != "$expected_sha256" ]; then \
+            echo "SHA256 mismatch: expected $expected_sha256, got $actual" >&2; \
+            rm -f "$dest"; exit 1; \
+        fi && \
+        echo "[build] Saved to $dest"; \
+    } && \
+    extract_zip() { \
+        local zip_path="$1" dest_dir="$2"; \
+        echo "[build] Extracting $zip_path -> $dest_dir ..." && \
+        mkdir -p "$dest_dir" && \
+        unzip -qo "$zip_path" -d "$dest_dir" && \
+        rm -f "$zip_path"; \
+    } && \
+    \
+    # --- Gradle 8.14.2 --- \
+    gradle_ver="8.14.2" && \
+    gradle_dir="$LS_DIR/gradle-${gradle_ver}" && \
+    if [ -d "$gradle_dir" ]; then \
+        echo "[build] Gradle already exists, skipping"; \
+    else \
+        download_and_verify \
+            "https://services.gradle.org/distributions/gradle-${gradle_ver}-bin.zip" \
+            "$LS_DIR/gradle-${gradle_ver}.zip" \
+            "7197a12f450794931532469d4ff21a59ea2c1cd59a3ec3f89c035c3c420a6999" && \
+        extract_zip "$LS_DIR/gradle-${gradle_ver}.zip" "$(dirname "$gradle_dir")"; \
+    fi && \
+    \
+    # --- vscode-java VSIX 1.54.0-923 (linux-x64) --- \
+    vj_ver="1.54.0-923" && \
+    vj_tag="v${vj_ver%%-*}" && \
+    vj_dirname="vscode-java-${vj_ver}" && \
+    vj_dir="$LS_DIR/$vj_dirname" && \
+    lombok_jar="$vj_dir/extension/lombok/lombok-1.18.39-4050.jar" && \
+    if [ -f "$lombok_jar" ]; then \
+        echo "[build] vscode-java already exists, skipping"; \
+    else \
+        download_and_verify \
+            "https://github.com/redhat-developer/vscode-java/releases/download/${vj_tag}/java-linux-x64-${vj_ver}.vsix" \
+            "$LS_DIR/${vj_dirname}.vsix" \
+            "9d4b15da54e25a0192f9bac073f086c015397d3676623b68dbf83a5dbaf5132b" && \
+        extract_zip "$LS_DIR/${vj_dirname}.vsix" "$vj_dir"; \
+    fi && \
+    \
+    # --- IntelliCode 1.2.30 (optional, non-fatal) --- \
+    # NOTE: version 1.2.30 == INITIAL_INTELLICODE_VERSION, so the runtime uses
+    # the legacy unversioned directory name "intellicode" (no version suffix).
+    ic_ver="1.2.30" && \
+    ic_dirname="intellicode" && \
+    ic_dir="$LS_DIR/$ic_dirname" && \
+    ic_jar="$ic_dir/extension/dist/com.microsoft.jdtls.intellicode.core-0.7.0.jar" && \
+    ic_members="$ic_dir/extension/dist/bundledModels/java_intellisense-members" && \
+    if [ -f "$ic_jar" ] && [ -f "$ic_members" ]; then \
+        echo "[build] IntelliCode already exists, skipping"; \
+    else \
+        if download_and_verify \
+            "https://VisualStudioExptTeam.gallery.vsassets.io/_apis/public/gallery/publisher/VisualStudioExptTeam/extension/vscodeintellicode/${ic_ver}/assetbyname/Microsoft.VisualStudio.Services.VSIXPackage" \
+            "$LS_DIR/${ic_dirname}.vsix" \
+            "7f61a7f96d101cdf230f96821be3fddd8f890ebfefb3695d18beee43004ae251"; then \
+            extract_zip "$LS_DIR/${ic_dirname}.vsix" "$ic_dir"; \
+        else \
+            echo "[build] IntelliCode download failed (non-fatal, optional)"; \
+            rm -f "$LS_DIR/${ic_dirname}.vsix"; \
+        fi; \
+    fi && \
+    \
+    echo "[build] Java LSP pre-download complete"
 
 # ---------------------------------------------------------------------------
 # Production stage — trims down dev-only layers and sets the runtime entrypoint
